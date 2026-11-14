@@ -65,18 +65,19 @@ stdenv.mkDerivation {
     "-DFCITX_INSTALL_PKGDATADIR=${placeholder "out"}/share/fcitx5"
   ];
 
-  # 默认识别后端：本包的 whisper-cli + 本包内的模型，开箱即用。
-  # 用环境变量传（含空格），由 CMakeLists.txt 读入并转义后编进插件；
-  # 走 cmakeFlags 会被 CMake 按空格拆成多个参数。
-  # 用户可在 ~/.config/fcitx5/conf/voice.conf 或 FCITX5_VOICE_BACKEND 里改。
+  # 插件静态链接 Rust 核心：CMake 配置时 target/release/libfcitx5_voice_core.a 必须已在
   preConfigure = ''
     cargo build --release --frozen --offline -p fcitx5-voice-core
-    export VOICE_DEFAULT_BACKEND="${whisper-cpp}/bin/whisper-cli -m ${placeholder "out"}/share/fcitx5-voice/ggml-base.bin -l zh -nt -f"
   '';
 
-  # 把模型装进本包（默认后端命令行里指向它）
+  # 1) 装模型；2) 把默认识别命令写进纯文本配置（不走二进制替换，避免
+  #    Nix placeholder 长度变化导致的字符串错位）。
   postInstall = ''
     install -Dm644 ${whisperModel} "$out/share/fcitx5-voice/ggml-base.bin"
+
+    substituteInPlace "$out/share/fcitx5/conf/voice.conf" \
+      --replace-fail 'BackendCommand=whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f' \
+                     'BackendCommand=${whisper-cpp}/bin/whisper-cli -m $out/share/fcitx5-voice/ggml-base.bin -l zh -nt -f'
   '';
 
   passthru = {

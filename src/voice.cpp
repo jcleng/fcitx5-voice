@@ -74,7 +74,15 @@ VoiceAddon::~VoiceAddon() {
 }
 
 void VoiceAddon::reloadConfig() {
-    readAsIni(config_, "conf/voice.conf");
+    // 先读包内默认值（share/fcitx5/conf/voice.conf，由 nix postInstall 写入正确的
+    // whisper-cli 与模型绝对路径），再读用户配置（~/.config/fcitx5/conf/voice.conf）覆盖。
+    // 这样 store 路径不必编进 .so——Nix 对二进制做 placeholder 替换时长度变化会错位。
+    RawConfig raw;
+    readAsIni(raw, StandardPath::Type::PkgData, "conf/voice.conf");
+    config_.load(raw);
+    raw = RawConfig();
+    readAsIni(raw, StandardPath::Type::PkgConfig, "conf/voice.conf");
+    config_.load(raw, /* partial= */ true);
 
     // 环境变量优先，方便不写配置文件也能调
     std::string cmd = envOr("FCITX5_VOICE_BACKEND",

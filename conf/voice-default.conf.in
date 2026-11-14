@@ -1,0 +1,26 @@
+# fcitx5-voice 的默认配置（安装到 <prefix>/share/fcitx5/conf/voice.conf）。
+#
+# 这是「包级默认值」：插件启动时先读它，再用
+# ~/.config/fcitx5/conf/voice.conf（用户配置）覆盖，最后环境变量最优先。
+#
+# 要改识别命令/模型路径，编辑用户配置或设置 FCITX5_VOICE_BACKEND，
+# 不要改这个文件（升级会被覆盖）。
+
+[Voice]
+# 识别命令；末尾自动追加 WAV 路径。空 = 关闭语音输入。
+BackendCommand=@VOICE_DEFAULT_BACKEND@
+
+# 语音键：Alt_L / Alt_R / Control_R / Menu
+VoiceKey=Alt_R
+
+# 长短按分界（毫秒）：按住 >= 此值松开立即结束
+HoldMs=300
+
+# 点按模式下，静音多久自动结束（毫秒）
+SilenceMs=1500
+
+# 说话时是否在编辑区显示预览
+ShowPreedit=True
+
+# 总开关
+Enabled=True

@@ -12,14 +12,9 @@ include(GNUInstallDirs)
 option(VOICE_CAPTURE "Build with microphone capture (cpal)" ON)
 
 # 默认识别后端命令行（末尾自动追加 WAV 路径）。
-# 优先读环境变量 VOICE_DEFAULT_BACKEND（含空格也安全，Nix 包用这种方式传）；
-# 其次 -DVOICE_DEFAULT_BACKEND=...；都没有时用 PATH 里的 whisper-cli。
-if(DEFINED ENV{VOICE_DEFAULT_BACKEND})
-    set(VOICE_DEFAULT_BACKEND "$ENV{VOICE_DEFAULT_BACKEND}")
-else()
-    set(VOICE_DEFAULT_BACKEND "whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f"
-        CACHE STRING "Default ASR backend command line")
-endif()
+# 不编进 .so，而是写进安装的 share/fcitx5/conf/voice.conf（纯文本，便于 nix 覆盖）。
+set(VOICE_DEFAULT_BACKEND "whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f"
+    CACHE STRING "Default ASR backend command line")
 
 if(VOICE_CAPTURE)
     find_package(ALSA REQUIRED)
@@ -68,12 +63,6 @@ if(VOICE_CAPTURE)
     target_link_libraries(voice PRIVATE ALSA::ALSA)
 endif()
 
-# 把默认后端命令行编进插件（C++ 字符串字面量，转义反斜杠与引号）
-string(REPLACE "\\" "\\\\" _voice_backend "${VOICE_DEFAULT_BACKEND}")
-string(REPLACE "\"" "\\\"" _voice_backend "${_voice_backend}")
-target_compile_definitions(voice PRIVATE
-    FCITX5_VOICE_DEFAULT_BACKEND="${_voice_backend}"
-)
 
 if(NOT VOICE_CORE_STATIC)
     set_target_properties(voice PROPERTIES INSTALL_RPATH "$ORIGIN/..")
@@ -98,3 +87,10 @@ configure_file(conf/voice.conf.in
     "${CMAKE_CURRENT_BINARY_DIR}/voice.conf" @ONLY)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/voice.conf"
     DESTINATION "${FCITX_INSTALL_PKGDATADIR}/addon")
+
+# 默认配置（含识别后端命令行），插件启动时作为 PkgData 读入；
+# 用户的 ~/.config/fcitx5/conf/voice.conf 会覆盖它。
+configure_file(conf/voice-default.conf.in
+    "${CMAKE_CURRENT_BINARY_DIR}/voice-default.conf" @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/voice-default.conf"
+    DESTINATION "${FCITX_INSTALL_PKGDATADIR}/conf" RENAME voice.conf)

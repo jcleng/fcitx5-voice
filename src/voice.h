@@ -32,14 +32,9 @@ class VoiceConfig : public Configuration {
 public:
     Option<std::string> backendCommand{
         this, "BackendCommand", "识别命令（末尾自动追加 WAV 路径；空=关闭）",
-        // 默认值：编译时由 CMake 注入（nix 包里是 whisper-cli 与模型的绝对路径）；
-        // 没有注入时给个占位，用户未配置时会因找不到 whisper-cli 而报错。
-#ifdef FCITX5_VOICE_DEFAULT_BACKEND
-        FCITX5_VOICE_DEFAULT_BACKEND
-#else
-        "whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f"
-#endif
-    };
+        // 真正的默认值来自 share/fcitx5/conf/voice.conf（nix 包写死 whisper-cli
+        // 与模型的绝对路径）；这里的兜底只在配置文件缺失时用。
+        "whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f"};
     Option<std::string> voiceKey{this, "VoiceKey",
                                  "语音键（左 Alt / 右 Alt / 右 Ctrl / 菜单键）",
                                  "Alt_R"};
