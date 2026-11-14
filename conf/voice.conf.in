@@ -1,0 +1,17 @@
+[Addon]
+Name=Voice Input
+Name[zh_CN]=本地语音输入
+Category=Module
+Version=@PROJECT_VERSION@
+Enabled=True
+Library=libvoice
+Type=SharedLibrary
+OnDemand=False
+Configurable=True
+
+[Addon/Dependencies]
+0=core:5.0.0
+
+[Configuration]
+# 独立模式 addon：不注册输入法，只在 PreInputMethod 阶段拦截语音键
+# （rime / pinyin 等仍是当前输入法，语音键之外的按键照常工作）

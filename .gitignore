@@ -1,0 +1,7 @@
+/target
+/build
+result
+*.o
+*.so
+*.a
+key_harness

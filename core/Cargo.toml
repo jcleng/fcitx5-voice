@@ -1,0 +1,26 @@
+[package]
+name = "fcitx5-voice-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "本地语音输入核心：热键状态机、音频分帧、VAD、ASR 抽象与上屏差分（与平台解耦）"
+
+[lib]
+name = "fcitx5_voice_core"
+# 静态库给 C++ 插件链接；rlib 给测试和其它 Rust crate 用
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+anyhow = "1"
+
+[features]
+default = []
+# 打开后编译麦克风采集（Linux 需要 libasound2-dev / alsa-lib）
+capture = ["dep:cpal"]
+# 打开后编译 X11 全局热键（plugin 之外的可选守护进程用，需要 libx11-dev）
+linux-x11 = []
+
+[dependencies.cpal]
+version = "0.15"
+optional = true
