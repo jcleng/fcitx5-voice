@@ -218,7 +218,8 @@ impl AsrChannel for ProcessChannel {
         if text.is_empty() {
             None
         } else {
-            Some(text)
+            // whisper -l zh 出繁体，转成简体
+            Some(crate::t2s::to_simplified(&text))
         }
     }
 
