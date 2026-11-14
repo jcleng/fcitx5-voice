@@ -59,6 +59,10 @@ target_link_libraries(voice PRIVATE
     ${VOICE_CORE_LIB}
 )
 
+# fcitx5 5.1 把 StandardPath 标成 deprecated（改名 StandardPaths），
+# 但我们用它的 Type 枚举做两代兼容，这里关掉这个警告（避免 -Werror 挂）。
+target_compile_options(voice PRIVATE "-Wno-deprecated-declarations")
+
 if(VOICE_CAPTURE)
     target_link_libraries(voice PRIVATE ALSA::ALSA)
 endif()

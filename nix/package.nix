@@ -77,7 +77,7 @@ stdenv.mkDerivation {
 
     substituteInPlace "$out/share/fcitx5/conf/voice.conf" \
       --replace-fail 'BackendCommand=whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f' \
-                     'BackendCommand=${whisper-cpp}/bin/whisper-cli -m $out/share/fcitx5-voice/ggml-base.bin -l zh -nt -f'
+                     "BackendCommand=${whisper-cpp}/bin/whisper-cli -m ${placeholder "out"}/share/fcitx5-voice/ggml-base.bin -l zh -nt -f"
   '';
 
   passthru = {
