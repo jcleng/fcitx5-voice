@@ -32,12 +32,17 @@ namespace fcitx {
 
 namespace {
 
-/// 环境变量覆盖（调试用）
-std::string envOr(const char *name, const std::string &fallback) {
+/// 取环境变量并记录来源，用于日志里说明「这条命令是哪来的」
+struct SourcedValue {
+    std::string value;
+    const char *source;
+};
+
+SourcedValue envOrTracked(const char *name, const std::string &fallback) {
     if (const char *v = std::getenv(name); v && *v) {
-        return v;
+        return {v, "环境变量"};
     }
-    return fallback;
+    return {fallback, "配置文件"};
 }
 
 int envIntOr(const char *name, int fallback) {
@@ -110,8 +115,9 @@ void VoiceAddon::reloadConfig() {
     loadSection(StandardPath::Type::PkgConfig, /* partial= */ true);
 
     // 环境变量优先，方便不写配置文件也能调
-    std::string cmd = envOr("FCITX5_VOICE_BACKEND",
-                            config_.backendCommand.value());
+    const SourcedValue backend =
+        envOrTracked("FCITX5_VOICE_BACKEND", config_.backendCommand.value());
+    const std::string &cmd = backend.value;
     const uint32_t hold =
         static_cast<uint32_t>(envIntOr("FCITX5_VOICE_HOLD_MS",
                                        config_.holdMs.value()));
@@ -124,7 +130,11 @@ void VoiceAddon::reloadConfig() {
         voice_ = nullptr;
     }
     voice_ = voice_new(cmd.c_str(), hold, silence);
-    VLOG() << "voice backend = " << cmd << ", ready = " << (voice_ ? voice_ready(voice_) : 0);
+    const bool ready = voice_ && voice_ready(voice_);
+    // 用 Info 级别：不加 --verbose 也能在日志里看到，方便确认配置是否生效
+    FCITX_LOGC(voice, Info)
+        << "voice: 后端来源=" << backend.source << ", ready=" << (ready ? 1 : 0)
+        << ", 命令=[" << cmd << "]";
 }
 
 void VoiceAddon::setConfig(const RawConfig &config) {
@@ -279,6 +289,7 @@ void VoiceAddon::clearIndicator(InputContext *ic) {
     }
 #else
     (void)ic;
+    (void)shown;
 #endif
 }
 
