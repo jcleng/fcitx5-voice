@@ -62,26 +62,30 @@ nix run .#default       # 启动 fcitx5
 nix develop
 ```
 
-NixOS `configuration.nix`：
+NixOS `flake.nix` 加 input：
 
 ```nix
 {
   inputs.fcitx5-voice.url = "github:jcleng/fcitx5-voice";
-
-  outputs = { self, nixpkgs, fcitx5-voice, ... }: {
-    nixosConfigurations.mine = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        {
-          services.xserver.desktopManager.fcitx5.addons = [
-            fcitx5-voice.packages.x86_64-linux.default
-          ];
-        }
-      ];
-    };
-  };
 }
 ```
+
+`configuration.nix` 里把它加到 fcitx5 的 addons（配合 `i18n.inputMethod.type = "fcitx5"`）：
+
+```nix
+{ inputs, pkgs, ... }:
+{
+  i18n.inputMethod.enable = true;
+  i18n.inputMethod.type = "fcitx5";
+  i18n.inputMethod.fcitx5.addons = [
+    pkgs.fcitx5-rime
+    inputs.fcitx5-voice.packages.${pkgs.stdenv.hostPlatform.system}.default
+  ];
+}
+```
+
+> 注意是 `i18n.inputMethod.fcitx5.addons`，不是
+> `services.xserver.desktopManager.fcitx5.addons`（那个选项在 NixOS 里不存在）。
 
 ## 配置
 
