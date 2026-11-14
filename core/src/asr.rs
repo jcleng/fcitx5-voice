@@ -22,6 +22,12 @@ pub trait AsrChannel: Send {
     fn partial(&self) -> Option<&str> {
         None
     }
+    /// 同 [`Self::partial`]，但返回 owned 字符串。
+    ///
+    /// 真流式的渠道中间结果存在锁里，`&self` 借不出来，就覆盖这个方法。
+    fn partial_owned(&self) -> Option<String> {
+        self.partial().map(|s| s.to_string())
+    }
     /// 结束并取最终结果
     fn finish(&mut self) -> Option<String>;
     /// 丢弃已收音频
@@ -48,10 +54,10 @@ impl MultiChannel {
         }
     }
 
-    pub fn partials(&self) -> Vec<(&str, &str)> {
+    pub fn partials(&self) -> Vec<(&str, String)> {
         self.channels
             .iter()
-            .filter_map(|c| c.partial().map(|p| (c.name(), p)))
+            .filter_map(|c| c.partial_owned().map(|p| (c.name(), p)))
             .collect()
     }
 
@@ -141,7 +147,7 @@ impl ProcessChannel {
 ///
 /// 不能直接用 split_whitespace：模型路径里常有空格（如
 /// "/home/me/My Models/ggml.bin"），按空格切会把它拆坏。
-fn split_command(cmdline: &str) -> Vec<String> {
+pub(crate) fn split_command(cmdline: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;

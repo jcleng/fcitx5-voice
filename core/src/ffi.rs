@@ -13,7 +13,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::asr::{AsrChannel, MultiChannel, ProcessChannel};
+use crate::asr::{AsrChannel, MultiChannel};
 use crate::hotkey::{Action, Mode, TriggerConfig};
 use crate::typer::Update;
 use crate::VoiceSession;
@@ -53,11 +53,10 @@ struct Inner {
 }
 
 fn build_channels(cmd: &str) -> Vec<Box<dyn AsrChannel>> {
-    let mut channels: Vec<Box<dyn AsrChannel>> = Vec::new();
-    if !cmd.trim().is_empty() {
-        channels.push(Box::new(ProcessChannel::new("process", cmd)));
+    match crate::sherpa::Backend::parse(cmd).build_channel() {
+        Some(ch) => vec![ch],
+        None => Vec::new(),
     }
-    channels
 }
 
 impl Inner {

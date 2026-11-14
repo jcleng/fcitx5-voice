@@ -21,6 +21,7 @@
 #include <fcitx/instance.h>
 #include <fcitx-utils/event.h>
 
+#include <array>
 #include <memory>
 #include <string>
 
@@ -43,8 +44,8 @@ public:
     Option<int, IntConstrain> silenceMs{
         this, "SilenceMs", "点按后静音多久自动结束（毫秒）", 1500,
         IntConstrain(200, 10000)};
-    Option<bool> showPreedit{this, "ShowPreedit",
-                             "说话时在编辑区显示识别预览", true};
+    // key 名保持 ShowPreedit（改了会丢用户已有配置），语义变成「显示录音提示」
+    Option<bool> showPreedit{this, "ShowPreedit", "显示录音提示", true};
     Option<bool> enabled{this, "Enabled", "启用语音输入", true};
 
     const char *typeName() const override { return "VoiceConfig"; }
@@ -75,9 +76,11 @@ private:
     bool isVoiceKey(const Key &key) const;
     /// 取出 update 里的 (退格数, 插入文本)
     void applyUpdate(InputContext *ic, const std::string &update);
-    /// 在编辑区显示/更新预览
-    void showPreedit(InputContext *ic, const std::string &text);
-    void clearPreedit(InputContext *ic);
+    /// 在光标处显示录音/识别提示（InputPanel::setOverlayMessage，5.1.22+）
+    void showIndicator(InputContext *ic, const std::string &text);
+    void clearIndicator(InputContext *ic);
+    /// 按状态和音量拼出提示文字
+    std::string indicatorText(int phase, int level) const;
 
     Instance *instance_;
     VoiceConfig config_;
@@ -89,7 +92,11 @@ private:
     InputContext *ic_ = nullptr;
     /// 轮询定时器
     std::unique_ptr<EventSourceTime> timer_;
-    /// 编辑区里上一次的预览文本
+    /// 上一次写进 overlay 的提示文本（去重，变了才刷 UI）
+    std::string indicator_;
+    /// 音量历史（每项 0-8），拼波形用
+    std::array<int, 8> history_{};
+    /// 边说边出字累积的增量文本（目前不显示，只保留给将来）
     std::string preedit_;
     /// 事件监听句柄
     std::unique_ptr<HandlerTableEntry<EventHandler>> keyWatcher_;

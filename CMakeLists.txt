@@ -63,6 +63,12 @@ target_link_libraries(voice PRIVATE
 # 但我们用它的 Type 枚举做两代兼容，这里关掉这个警告（避免 -Werror 挂）。
 target_compile_options(voice PRIVATE "-Wno-deprecated-declarations")
 
+# 光标处的「🎙 正在听…」提示用 InputPanel::setOverlayMessage，5.1.22 起才有。
+# 老版本不定义这个宏，插件里对应的显示代码自动跳过（其余功能照常）。
+if(Fcitx5Core_VERSION VERSION_GREATER_EQUAL 5.1.22)
+    target_compile_definitions(voice PRIVATE FCITX5_VOICE_OVERLAY_MESSAGE=1)
+endif()
+
 if(VOICE_CAPTURE)
     target_link_libraries(voice PRIVATE ALSA::ALSA)
 endif()

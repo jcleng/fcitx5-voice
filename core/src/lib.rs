@@ -11,6 +11,7 @@ pub mod audio;
 pub mod capture;
 pub mod ffi;
 pub mod hotkey;
+pub mod sherpa;
 pub mod t2s;
 pub mod typer;
 pub mod vad;
@@ -19,6 +20,7 @@ pub mod wav;
 pub use asr::{AsrChannel, MultiChannel, ProcessChannel, Transcript};
 pub use audio::{CaptureFormat, Framer, Resampler, FRAME_SAMPLES, TARGET_RATE};
 pub use hotkey::{Action, Mode, TriggerConfig, VoiceTrigger};
+pub use sherpa::{Backend, SherpaChannel, SherpaOptions, StreamingChannel};
 pub use t2s::to_simplified;
 pub use typer::{Typer, Update};
 pub use vad::Vad;
@@ -91,7 +93,7 @@ impl VoiceSession {
             .asr
             .partials()
             .first()
-            .map(|(_, t)| t.to_string())
+            .map(|(_, t)| t.clone())
             .unwrap_or_default();
         if partial != self.last_partial {
             let update = self.typer.update(&partial);
