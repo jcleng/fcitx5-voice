@@ -31,21 +31,21 @@ namespace fcitx {
 class VoiceConfig : public Configuration {
 public:
     Option<std::string> backendCommand{
-        this, "Voice/BackendCommand", "识别命令（末尾自动追加 WAV 路径；空=关闭）",
+        this, "BackendCommand", "识别命令（末尾自动追加 WAV 路径；空=关闭）",
         // 真正的默认值来自 share/fcitx5/conf/voice.conf（nix 包写死 whisper-cli
         // 与模型的绝对路径）；这里的兜底只在配置文件缺失时用。
         "whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f"};
-    Option<std::string> voiceKey{this, "Voice/VoiceKey",
+    Option<std::string> voiceKey{this, "VoiceKey",
                                  "语音键（左 Alt / 右 Alt / 右 Ctrl / 菜单键）",
                                  "Alt_R"};
     Option<int, IntConstrain> holdMs{
-        this, "Voice/HoldMs", "长按/点按分界（毫秒）", 300, IntConstrain(50, 5000)};
+        this, "HoldMs", "长按/点按分界（毫秒）", 300, IntConstrain(50, 5000)};
     Option<int, IntConstrain> silenceMs{
-        this, "Voice/SilenceMs", "点按后静音多久自动结束（毫秒）", 1500,
+        this, "SilenceMs", "点按后静音多久自动结束（毫秒）", 1500,
         IntConstrain(200, 10000)};
-    Option<bool> showPreedit{this, "Voice/ShowPreedit",
+    Option<bool> showPreedit{this, "ShowPreedit",
                              "说话时在编辑区显示识别预览", true};
-    Option<bool> enabled{this, "Voice/Enabled", "启用语音输入", true};
+    Option<bool> enabled{this, "Enabled", "启用语音输入", true};
 
     const char *typeName() const override { return "VoiceConfig"; }
 };
