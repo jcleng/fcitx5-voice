@@ -8,6 +8,19 @@
 #include <fcitx-config/iniparser.h>
 #include <fcitx-utils/log.h>
 
+// fcitx5 5.1 把 StandardPath 改名为 StandardPaths（枚举变成顶层的
+// StandardPathsType），但仍在 iniparser.h 里保留了 StandardPath::Type
+// 的兼容模板。所以统一用 StandardPath::Type：5.0 原生支持，5.1 走转换器。
+// 5.1 里 StandardPath 标了 deprecated，这里局部关掉这个警告（避免 -Werror 挂）。
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#include <fcitx-utils/standardpath.h>
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
