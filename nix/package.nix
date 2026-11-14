@@ -67,7 +67,7 @@ stdenv.mkDerivation {
 
   # 插件静态链接 Rust 核心：CMake 配置时 target/release/libfcitx5_voice_core.a 必须已在
   preConfigure = ''
-    cargo build --release --frozen --offline -p fcitx5-voice-core
+    cargo build --release --frozen --offline -p fcitx5-voice-core --features capture
   '';
 
   # 1) 装模型；2) 把默认识别命令写进纯文本配置（不走二进制替换，避免

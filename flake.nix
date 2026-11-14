@@ -60,7 +60,7 @@
                 pkg-config
               ];
               buildInputs = with pkgs; [ alsa-lib ];
-              # 核心单测 + C ABI 行为测试；不开 capture 特性（不需要运行中的 ALSA）
+              # 核心单测 + C ABI 行为测试（capture 默认开，运行测试时跳过真实采集）
               buildPhase = ''
                 runHook preBuild
                 cargo test --offline --frozen -p fcitx5-voice-core
@@ -71,8 +71,8 @@
               checkPhase = ''
                 runHook preCheck
                 g++ -std=c++20 test/key_harness.cpp -I core/include \
-                  target/release/libfcitx5_voice_core.a -lpthread -o harness
-                ./harness
+                  target/release/libfcitx5_voice_core.a -lasound -lpthread -o harness
+                FCITX5_VOICE_TEST_NO_CAPTURE=1 ./harness
                 runHook postCheck
               '';
               installPhase = ''

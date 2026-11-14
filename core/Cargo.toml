@@ -15,7 +15,7 @@ crate-type = ["rlib", "staticlib"]
 anyhow = "1"
 
 [features]
-default = []
+default = ["capture"]
 # 打开后编译麦克风采集（Linux 需要 libasound2-dev / alsa-lib）
 capture = ["dep:cpal"]
 # 打开后编译 X11 全局热键（plugin 之外的可选守护进程用，需要 libx11-dev）

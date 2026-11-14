@@ -3,8 +3,11 @@
 // 验证：没有后端时不开麦克风、按住/点按状态机、cancel、以及
 // 「后端拿到的是 16k 单声道 WAV」这条链路。
 //
-// 编译：g++ test/key_harness.cpp -I../core/include -L../target/release \
-//         -lfcitx5_voice_core -o key_harness && ./key_harness
+// 编译（capture 默认开启，需要链 ALSA）：
+//   g++ -std=c++20 test/key_harness.cpp -I core/include \
+//       target/release/libfcitx5_voice_core.a -lasound -lpthread -o key_harness
+// 运行前设 FCITX5_VOICE_TEST_NO_CAPTURE=1（CI/无麦克风环境跳过真实采集）。
+//   ./key_harness
 
 #include <cassert>
 #include <cstdio>

@@ -41,8 +41,15 @@ struct Inner {
     level: c_int,
     /// 识别后端命令行（空 = 没有后端）
     backend_cmd: String,
-    /// 采到的音量（采集线程写，主线程读）
+    /// 采到的音量（采集回调写，主线程读）
     audio_level: Arc<Mutex<f32>>,
+    /// 采集回调写入的 PCM 缓冲（主线程 tick 时取走喂给会话）
+    capture_pcm: Arc<Mutex<Vec<i16>>>,
+    /// 停止采集的信号（回调看到后不再收数据）
+    stop_capture: Arc<std::sync::atomic::AtomicBool>,
+    /// 活着的采集流（drop 即关闭麦克风）；cpal::Stream 是 !Send，只能留在本线程
+    #[cfg(feature = "capture")]
+    capture: Option<crate::capture::Capture>,
 }
 
 fn build_channels(cmd: &str) -> Vec<Box<dyn AsrChannel>> {
@@ -65,6 +72,10 @@ impl Inner {
             level: 0,
             backend_cmd,
             audio_level: Arc::new(Mutex::new(0.0)),
+            capture_pcm: Arc::new(Mutex::new(Vec::new())),
+            stop_capture: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            #[cfg(feature = "capture")]
+            capture: None,
         }
     }
 
@@ -76,6 +87,63 @@ impl Inner {
     fn reset_session(&mut self, cfg: TriggerConfig) {
         self.session = VoiceSession::new(cfg, MultiChannel::new(build_channels(&self.backend_cmd)));
     }
+}
+
+/// 启动麦克风采集线程。松开时由 `stop_capture` 置位让它退出。
+///
+/// 采集线程每拿到一批 16k 单声道 PCM，就加锁把 PCM 喂给会话（同时用它更新
+/// 音量）；识别仍然在松开时的 `finish` 里跑（ProcessChannel 整段喂命令行）。
+#[cfg(feature = "capture")]
+fn start_capture(inner: Arc<Mutex<Inner>>) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    // 回调线程只碰这两个（都是 Send）：PCM 缓冲 + 音量。
+    // 不捕获 Inner——Inner 里有 cpal::Stream（!Send），不能进回调。
+    let pcm_buf: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
+    let level = Arc::new(Mutex::new(0.0f32));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    {
+        let mut g = inner.lock().unwrap();
+        g.capture_pcm = pcm_buf.clone();
+        g.audio_level = level.clone();
+        g.stop_capture = stop.clone();
+    }
+
+    // 测试/无麦克风环境：跳过真实采集（用 voice_push_pcm 手工喂）
+    if std::env::var_os("FCITX5_VOICE_TEST_NO_CAPTURE").is_some() {
+        inner.lock().unwrap().capture = None;
+        return Ok(());
+    }
+
+    let cb_buf = pcm_buf.clone();
+    let cb_level = level.clone();
+    let cb_stop = stop.clone();
+    let capture = crate::capture::start(None, move |pcm: Vec<i16>| {
+        if cb_stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if !pcm.is_empty() {
+            let sum: f64 = pcm.iter().map(|&s| (s as f64 / 32768.0).powi(2)).sum();
+            let rms = (sum / pcm.len() as f64).sqrt() as f32;
+            if let Ok(mut l) = cb_level.lock() {
+                *l = (rms * 6.0).clamp(0.0, 1.0);
+            }
+            if let Ok(mut b) = cb_buf.lock() {
+                b.extend_from_slice(&pcm);
+            }
+        }
+    })
+    .map_err(|e| format!("打开麦克风失败: {e}"))?;
+
+    // cpal::Stream 是 !Send，留在本线程，跟句柄一起活
+    inner.lock().unwrap().capture = Some(capture);
+    Ok(())
+}
+
+#[cfg(not(feature = "capture"))]
+fn start_capture(_inner: Arc<Mutex<Inner>>) -> Result<(), String> {
+    Err("这个构建没有编译麦克风采集（需要 --features capture）".to_string())
 }
 
 /// 插件持有的句柄（不透明指针）。
@@ -166,6 +234,16 @@ pub unsafe extern "C" fn voice_key_down(handle: *mut VoiceHandle) -> c_int {
         guard.error.clear();
         guard.level = 0;
         *guard.audio_level.lock().unwrap() = 0.0;
+        // 真正打开麦克风：起采集线程，边录边喂会话
+        let shared = inner.inner.clone();
+        drop(guard);
+        if let Err(e) = start_capture(shared) {
+            let mut g = inner.inner.lock().unwrap();
+            g.phase = VOICE_ERROR;
+            g.error = e;
+            g.session.cancel();
+            return 0;
+        }
         return 1;
     }
     0
@@ -203,11 +281,28 @@ pub unsafe extern "C" fn voice_tick(handle: *mut VoiceHandle) -> c_int {
     if !guard.session.is_recording() {
         return 0;
     }
+    // 把采集回调攒下的 PCM 取出来，喂给会话（分帧 + VAD + ASR 缓冲）
+    let pcm: Vec<i16> = {
+        let mut buf = guard.capture_pcm.lock().unwrap();
+        if buf.is_empty() {
+            Vec::new()
+        } else {
+            std::mem::take(&mut *buf)
+        }
+    };
+    if !pcm.is_empty() {
+        if let Some(update) = guard.session.push_pcm(&pcm, now) {
+            if !update.is_empty() {
+                guard.pending = Some(update);
+            }
+        }
+    }
+
     if let Some(Action::Stop) = guard.session.tick(now) {
         finish_session(&mut guard);
         return 1;
     }
-    // 音量：采集线程写 raw 音量，这里换算成 0-100
+    // 音量：采集回调写 raw 音量，这里换算成 0-100
     let raw = *guard.audio_level.lock().unwrap();
     guard.level = (raw * 100.0).clamp(0.0, 100.0) as c_int;
     0
@@ -377,6 +472,13 @@ pub unsafe extern "C" fn voice_mode(handle: *mut VoiceHandle) -> c_int {
 }
 
 fn cancel_session(guard: &mut Inner) {
+    guard
+        .stop_capture
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(feature = "capture")]
+    {
+        guard.capture = None; // drop 关闭麦克风
+    }
     guard.session.cancel();
     guard.pending = None;
     guard.final_text.clear();
@@ -386,6 +488,13 @@ fn cancel_session(guard: &mut Inner) {
 }
 
 fn finish_session(guard: &mut Inner) {
+    guard
+        .stop_capture
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(feature = "capture")]
+    {
+        guard.capture = None; // 先关麦克风再识别
+    }
     guard.phase = VOICE_RECOGNIZING;
     let (text, update) = guard.session.finish();
     guard.final_text = text;
@@ -399,7 +508,13 @@ fn finish_session(guard: &mut Inner) {
 mod tests {
     use super::*;
 
+    /// 测试环境没有麦克风：让 start_capture 直接返回，用 voice_push_pcm 手工喂。
+    fn no_capture() {
+        std::env::set_var("FCITX5_VOICE_TEST_NO_CAPTURE", "1");
+    }
+
     fn new_handle(cmd: *const c_char) -> *mut VoiceHandle {
+        no_capture();
         unsafe { voice_new(cmd, 300, 1500) }
     }
 
