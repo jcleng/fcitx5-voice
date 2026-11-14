@@ -12,9 +12,14 @@ include(GNUInstallDirs)
 option(VOICE_CAPTURE "Build with microphone capture (cpal)" ON)
 
 # 默认识别后端命令行（末尾自动追加 WAV 路径）。
-# Nix 包会传 whisper-cli 与模型的绝对路径；手动构建时用 PATH 里的 whisper-cli。
-set(VOICE_DEFAULT_BACKEND "whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f"
-    CACHE STRING "Default ASR backend command line")
+# 优先读环境变量 VOICE_DEFAULT_BACKEND（含空格也安全，Nix 包用这种方式传）；
+# 其次 -DVOICE_DEFAULT_BACKEND=...；都没有时用 PATH 里的 whisper-cli。
+if(DEFINED ENV{VOICE_DEFAULT_BACKEND})
+    set(VOICE_DEFAULT_BACKEND "$ENV{VOICE_DEFAULT_BACKEND}")
+else()
+    set(VOICE_DEFAULT_BACKEND "whisper-cli -m /usr/share/whisper/ggml-base.bin -l zh -nt -f"
+        CACHE STRING "Default ASR backend command line")
+endif()
 
 if(VOICE_CAPTURE)
     find_package(ALSA REQUIRED)
