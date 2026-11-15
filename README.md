@@ -195,9 +195,10 @@ FCITX5_VOICE_BACKEND='stream:/path/to/my-streaming-asr --lang zh'
 `SherpaOnnxIsOnlineStreamReady` / `SherpaOnnxDecodeOnlineStream` /
 `SherpaOnnxGetOnlineStreamResult`）按上面协议输出即可。
 
-> **还没接到屏幕上**：`core/src/ffi.rs` 的 `voice_take_update()` 已经把增量暴露给 C++，
-> 但 C++ 侧是否每帧消费它，决定了你能不能真的看到边说边出字。没接的话，流式后端
-> 依然只在松开时一次性上屏。
+> **已经接到屏幕上**：`src/voice.cpp` 的 `poll()`（50ms）会消费
+> `voice_take_update()` 的增量，用 `deleteSurroundingText` + `commitString` 打到焦点
+> 输入框；松手时用最后一次差分把「屏幕上的旧文本」修正成最终结果，不会重复上屏。
+> 独立 addon 写不了真正的 preedit，所以是逐字刷而非平滑插入，字多时会有轻微闪动。
 
 ## 行为
 
