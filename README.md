@@ -68,7 +68,7 @@ NixOS `flake.nix` 加 input：
 
 ```nix
 {
-  inputs.fcitx5-voice.url = "github:jcleng/fcitx5-voice";
+  inputs.fcitx5-voice.url = "github:jcleng/fcitx5-voice/v0.1.0";
 }
 ```
 
