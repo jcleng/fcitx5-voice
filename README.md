@@ -86,6 +86,15 @@ NixOS `flake.nix` 加 input：
 }
 ```
 
+通过Cachix提供二进制缓存：
+
+```nix
+nixConfig = {
+  extra-substituters = [ "https://jcleng-dev.cachix.org" ];
+  extra-trusted-public-keys = [ "jcleng-dev.cachix.org-1:z9ANWkDcDZfbUGK12osxOaX4u4A9kmhnRKu3Oh5OQcc=" ];
+};
+```
+
 > 注意是 `i18n.inputMethod.fcitx5.addons`，不是
 > `services.xserver.desktopManager.fcitx5.addons`（那个选项在 NixOS 里不存在）。
 
