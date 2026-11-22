@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.2.1
+
+**破坏性变更**：包内不再携带 whisper 模型。
+
+v0.2.0 起默认后端已经是 SenseVoice，whisper 的 `ggml-base.bin`（141MB）只剩占体积。
+这次把它连同 `whisper-cpp` 依赖一起从默认构建中移除。
+
+### 移除
+
+- `ggml-base.bin`（141MB）不再打包，`whisper-cpp` 不再是构建依赖。
+  模型从 380MB（SenseVoice 239MB + whisper 141MB）降到 239MB。
+- `packages.<system>.voice-whisper` 属性已删除（它本来就是「只带 whisper」的变体，
+  现在没意义了）。**用了这个属性的 flake 会报错，改回 `.default` 即可。**
+- `nix/package.nix` 的 `withWhisper` 参数已删除。
+
+### 不变
+
+- **通用的命令行后端能力完全保留**：`whisper-cli`、`sherpa-onnx-offline`、任何
+  「读 WAV 路径、把文本打到 stdout」的命令仍然能用，只是引擎和模型要自己装，
+  不再由本包代为打包。换成 whisper 的写法见 README 的「换识别后端」。
+
 ## v0.2.0
 
 默认识别后端换成**常驻的 SenseVoice**，并修掉两个会导致「没反应」的严重问题。
@@ -11,9 +32,10 @@
 - **`sherpa-serve`**：常驻识别器（`script/sherpa-serve.cpp`，直接调 sherpa-onnx C API）。
   模型只在第一次按键时加载，之后每次都是复用同一个进程，不再重复加载 239MB。
 - 模型与 tokens **全部随包安装**，运行期不下载任何东西。
-- 新增 `packages.<system>.voice-whisper`：只带 whisper 的精简变体（省约 230MB），
-  供系统没装 sherpa-onnx 或只想用 whisper 的场景。
 - `script/fetch-sensevoice-model.sh`：非 Nix 构建时下载模型（镜像优先、官方源兜底）。
+- **包内不再携带 whisper 模型**：`ggml-base.bin`（141MB）与 `whisper-cpp` 依赖已从默认构建中
+  移除（v0.2.0 起 SenseVoice 才是默认后端，whisper 那份只是占体积）。想用 whisper 请自行安装
+  `whisper-cli` 与模型，再用 `BackendCommand` 指过去——通用的命令行后端能力仍然保留。
 
 ### 修复
 
@@ -30,7 +52,7 @@
 ### 变更
 
 - 默认识别后端由 `whisper-cli` 改为 `stream:.../sherpa-serve`。
-  想换回 whisper：改 `BackendCommand` 或装 `voice-whisper`。
+  想换回 whisper：自行安装 `whisper-cli` 与模型后改 `BackendCommand`。
 - `stream:` 协议新增句末哨兵（4 字节 `FF FF FF FF`），进程可跨句复用；
   不认识哨兵的旧 wrapper 仍能靠关闭 stdin 收尾（有 1.5s 宽限兜底）。
 

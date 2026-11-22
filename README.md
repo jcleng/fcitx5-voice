@@ -10,16 +10,15 @@
 - 不写输入法引擎，只在 fcitx5 的 `PreInputMethod` 阶段拦截语音键，其余按键照常交给
   当前输入法（rime / fcitx5-pinyin 等）；
 - Rust 核心（热键状态机 / 重采样 / VAD / 上屏差分）静态链接进 C++ 插件，一个 `.so` 搞定；
-- 识别后端可换：默认是**常驻的 SenseVoice**（`sherpa-serve`，中英日韩粤、边说边出字），
-  也能换成 `whisper-cli`、sherpa-onnx CLI、本地其它命令行识别器；
-- **所有模型都打包进去**（SenseVoice int8 约 228MB + whisper base 约 141MB），
-  装完即用，运行期不下载任何东西。想省体积可用只带 whisper 的 `packages.<system>.voice-whisper`。
+- 识别后端可换：内置是**常驻的 SenseVoice**（`sherpa-serve`，中英日韩粤、边说边出字），
+  也能换成 `whisper-cli`、sherpa-onnx CLI、本地其它命令行识别器（用户自备引擎和模型）；
+- **模型已打包进去**（SenseVoice int8 约 228MB + tokens），装完即用，运行期不下载任何东西。
 
-### 为什么默认换成了 SenseVoice
+### 为什么用 SenseVoice
 
-whisper `ggml-base` 中英混说掉字较多，且每次识别都要重新加载模型。SenseVoice 在
-中文/混说上明显更好，配合 `sherpa-serve` 常驻进程只加载一次，松手到上屏更快。
-两者都随包提供，`BackendCommand` 一行就能切回去。
+whisper `ggml-base` 中英混说掉字较多，且用 CLI 时每次识别都要重新加载模型。
+SenseVoice 在中文/混说上明显更好，配合 `sherpa-serve` 常驻进程只加载一次，松手到上屏更快。
+本包不再内置 whisper 模型；想用 whisper 按[换识别后端](#换识别后端)自行安装即可。
 
 ## 它是怎么工作的
 
@@ -36,8 +35,8 @@ whisper `ggml-base` 中英混说掉字较多，且每次识别都要重新加载
 ```
 
 和 WowType 的思路一致（都是「C++ 外壳 + Rust 引擎」），区别是这里不实现拼音、也
-不内置推理代码，靠外部识别器；Nix 包会把 whisper `ggml-base` 模型和 `whisper-cli`
-一起装进来，所以装上就能用、也能换引擎。
+不内置推理代码，靠外部识别器；Nix 包会把 SenseVoice 模型和常驻的 `sherpa-serve`
+一起装进来，所以装上就能用，也随时能换引擎。
 
 ## 依赖
 
@@ -72,7 +71,7 @@ sudo cmake --install build                       # 装到 <prefix>/lib/fcitx5 �
 ### Nix / NixOS（推荐）
 
 ```bash
-nix profile install github:jcleng/fcitx5-voice   # 自带 whisper-cli 与 ggml-base 模型（约 141MB）
+nix profile install github:jcleng/fcitx5-voice   # 自带 SenseVoice 模型（约 228MB）与常驻识别器
 ```
 
 装好后在 `fcitx5-configtool` 里启用 `voice` 插件即可。本包**不是**独立程序，没有可执行文件，
@@ -82,7 +81,7 @@ NixOS `flake.nix` 加 input：
 
 ```nix
 {
-  inputs.fcitx5-voice.url = "github:jcleng/fcitx5-voice/v0.2.0";
+  inputs.fcitx5-voice.url = "github:jcleng/fcitx5-voice/v0.2.1";
 }
 ```
 
@@ -144,25 +143,16 @@ FCITX5_VOICE_SILENCE_MS=1500
 
 ### 模型在哪
 
-**所有模型都随包安装，运行期不下载任何东西。** Nix 包装好之后：
+**模型随包安装，运行期不下载任何东西。** Nix 包装好之后：
 
 ```
 <nix store>/share/fcitx5-voice/sensevoice/model.int8.onnx   # SenseVoice int8，约 228MB
 <nix store>/share/fcitx5-voice/sensevoice/tokens.txt        # 必需，约 309KB
-<nix store>/share/fcitx5-voice/ggml-base.bin                # whisper base，约 141MB
 <nix store>/libexec/fcitx5-voice/sherpa-serve               # 常驻识别器
 ```
 
-默认后端指向前两者。想省掉 SenseVoice（剩 230MB）用 `packages.<system>.voice-whisper`：
-
-```nix
-inputs.fcitx5-voice.packages.${pkgs.stdenv.hostPlatform.system}.voice-whisper
-```
-
-它的默认后端退回 `whisper-cli -m <store>/share/fcitx5-voice/ggml-base.bin`，不依赖 sherpa-onnx。
-
-想换更大的 whisper 模型（`ggml-small` 约 466MB、`ggml-medium` 约 1.5GB），改 `nix/package.nix`
-里的 `whisperModel`（`url` + `hash`），或用 `FCITX5_VOICE_BACKEND` 指向自己的模型路径。
+默认后端指向它们。想换更大的模型（如 whisper `ggml-small` 约 466MB、`ggml-medium` 约 1.5GB）
+或别的引擎，把引擎和模型自己放好，再用 `FCITX5_VOICE_BACKEND` / `BackendCommand` 指过去。
 
 非 Nix 安装：跑一次 `script/fetch-sensevoice-model.sh` 把模型下到 `models/sensevoice/`
 （镜像优先、官方源兜底），再用 `BackendCommand` 指过去。

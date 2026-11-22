@@ -13,18 +13,11 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         voice = pkgs.callPackage ./nix/package.nix { };
-
-        # 只要 whisper 后端（不装 SenseVoice 模型，省 230MB）；
-        # 系统没 sherpa-onnx 时用这个。
-        voice-whisper = pkgs.callPackage ./nix/package.nix {
-          withSenseVoice = false;
-        };
       in
       {
         packages = {
           voice = voice;
           default = voice;
-          inherit voice-whisper;
         };
 
         # 开发 shell：能直接 cargo test / cmake 构建
@@ -40,7 +33,6 @@
             pkg-config
             fcitx5
             alsa-lib
-            whisper-cpp
             sherpa-onnx
             python3
           ];
@@ -103,10 +95,6 @@
                 grep -q '^Library=libvoice' ${p}/share/fcitx5/addon/voice.conf
                 nm -D --defined-only ${p}/lib/fcitx5/libvoice.so \
                   | grep -q fcitx_addon_factory_instance
-
-                # whisper 模型随包安装（保留作为可切换后端）
-                test -f ${p}/share/fcitx5-voice/ggml-base.bin
-                test "$(stat -c%s ${p}/share/fcitx5-voice/ggml-base.bin)" -gt 100000000
 
                 # SenseVoice 模型 + tokens + 常駩识别器都在包里（运行期不下载）
                 test -f ${p}/share/fcitx5-voice/sensevoice/model.int8.onnx
