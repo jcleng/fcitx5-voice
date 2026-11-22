@@ -20,11 +20,6 @@
           default = voice;
         };
 
-        apps.default = {
-          type = "app";
-          program = "${pkgs.fcitx5}/bin/fcitx5";
-        };
-
         # 开发 shell：能直接 cargo test / cmake 构建
         devShells.default = pkgs.mkShell {
           inputsFrom = [ voice ];

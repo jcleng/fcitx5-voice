@@ -53,16 +53,16 @@ sudo cmake --install build                       # 装到 <prefix>/lib/fcitx5 �
 
 不带麦克风（只用外部 WAV 测试）可以 `-DVOICE_CAPTURE=OFF`。
 
-## 用 Nix / NixOS
+## 安装
+
+### Nix / NixOS（推荐）
 
 ```bash
-# 直接构建并运行
-nix build .#default     # 自带 whisper-cli 与 ggml-base 模型（约 141MB）
-nix run .#default       # 启动 fcitx5
-
-# 开发环境（cargo / cmake / fcitx5 头文件都在）
-nix develop
+nix profile install github:jcleng/fcitx5-voice   # 自带 whisper-cli 与 ggml-base 模型（约 141MB）
 ```
+
+装好后在 `fcitx5-configtool` 里启用 `voice` 插件即可。本包**不是**独立程序，没有可执行文件，
+不要用 `nix run` 启动。
 
 NixOS `flake.nix` 加 input：
 
@@ -86,7 +86,7 @@ NixOS `flake.nix` 加 input：
 }
 ```
 
-通过Cachix提供二进制缓存：
+通过Cachix提供二进制缓存（把下面这段加进你自己的 `flake.nix` 顶层即可，不用改上面的 input）：
 
 ```nix
 nixConfig = {
@@ -97,6 +97,14 @@ nixConfig = {
 
 > 注意是 `i18n.inputMethod.fcitx5.addons`，不是
 > `services.xserver.desktopManager.fcitx5.addons`（那个选项在 NixOS 里不存在）。
+
+### 开发
+
+```bash
+nix build .#default     # 构建本包
+nix flake check         # 单测 + C ABI 行为测试 + 安装后 smoke 测试
+nix develop             # cargo / cmake / fcitx5 头文件都在
+```
 
 ## 配置
 

@@ -41,6 +41,8 @@ stdenv.mkDerivation {
       ../conf
       ../test
       ../CMakeLists.txt
+      ../LICENSE-MIT
+      ../LICENSE-APACHE
     ];
   };
 
@@ -92,6 +94,5 @@ stdenv.mkDerivation {
       asl20
     ];
     platforms = lib.platforms.linux;
-    mainProgram = "fcitx5";
   };
 }
