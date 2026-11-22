@@ -169,7 +169,10 @@ void VoiceAddon::handleKeyEvent(KeyEvent &event) {
             // 松开：长按模式下这里会话就结束了；点按模式继续录
             event.filterAndAccept();
             if (voice_key_up(voice_)) {
-                finishAndCommit(ic);
+                // 会话已停，但识别在后台线程跑（不能在这里等——等就把
+                // 输入法主线程卡死了）。让定时器继续跑，phase 变成
+                // VOICE_RECOGNIZING，poll() 在拿到 DONE 后再上屏。
+                startTimer();
             } else {
                 // 点按模式：保持 active_，靠定时器等静音
                 startTimer();
@@ -363,6 +366,8 @@ void VoiceAddon::poll() {
         return;
     }
 
+    // DONE 现在由 voice_tick 的异步收割提供（识别跑在后台线程），
+    // 不能只看 tick 返回值。
     if (tick || phase == VOICE_DONE) {
         finishAndCommit(ic);
     } else if (phase == VOICE_ERROR) {

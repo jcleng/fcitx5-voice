@@ -5,3 +5,6 @@ result
 *.so
 *.a
 key_harness
+/models
+__pycache__/
+*.pyc

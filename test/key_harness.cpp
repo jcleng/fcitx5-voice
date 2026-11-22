@@ -10,12 +10,28 @@
 //   ./key_harness
 
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <thread>
 
 #include "../core/include/fcitx5-voice.h"
+
+/// 轮询 tick 直到 DONE/ERROR 或超时。异步识别后结果只能这样拿。
+static bool wait_done(VoiceHandle *h, int timeout_ms = 15000) {
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        voice_tick(h);
+        int p = voice_phase(h);
+        if (p == VOICE_DONE || p == VOICE_ERROR) {
+            return p == VOICE_DONE;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
 
 static int failures = 0;
 #define CHECK(cond)                                                            \
@@ -26,7 +42,7 @@ static int failures = 0;
         }                                                                      \
     } while (0)
 
-// 一个假后端：把自己收到的 argv 尾巴打完（这里我们用 /bin/cat，能读 WAV）
+// 一个假后端：把自己收到的 argv 尾巴打完（这里我们用 cat，能读 WAV）
 static void test_no_backend() {
     VoiceHandle *h = voice_new("", 300, 1500);
     CHECK(voice_ready(h) == 0);
@@ -40,7 +56,7 @@ static void test_no_backend() {
 }
 
 static void test_hold_release() {
-    VoiceHandle *h = voice_new("/bin/cat", 300, 1500);
+    VoiceHandle *h = voice_new("cat", 300, 1500);
     CHECK(voice_ready(h) == 1);
     CHECK(voice_key_down(h) == 1);
     CHECK(voice_is_recording(h) == 1);
@@ -48,30 +64,42 @@ static void test_hold_release() {
     int16_t pcm[1600] = {0};
     voice_push_pcm(h, pcm, 1600);
     std::this_thread::sleep_for(std::chrono::milliseconds(350));
+
+    // 关键回归断言：松开**不能**在主线程里等识别（那会把输入法卡死）。
+    auto t0 = std::chrono::steady_clock::now();
     CHECK(voice_key_up(h) == 1);
-    CHECK(voice_phase(h) == VOICE_DONE);
+    auto blocked = std::chrono::steady_clock::now() - t0;
+    CHECK(blocked < std::chrono::milliseconds(200));
+
+    // 松开后是「识别中」，不是「已完成」——结果由 tick 收割
+    CHECK(voice_phase(h) == VOICE_RECOGNIZING);
     CHECK(voice_is_recording(h) == 0);
+    CHECK(wait_done(h));
+    CHECK(voice_phase(h) == VOICE_DONE);
     voice_free(h);
     std::printf("test_hold_release ok\n");
 }
 
 static void test_tap_mode() {
-    VoiceHandle *h = voice_new("/bin/cat", 300, 1500);
+    VoiceHandle *h = voice_new("cat", 300, 1500);
     voice_key_down(h);
     // 立刻松开 = 点按，会话继续
     CHECK(voice_key_up(h) == 0);
     CHECK(voice_is_recording(h) == 1);
     CHECK(voice_mode(h) == 1);
-    // 静音超时后 tick 结束
+    // 静音超时后 tick 结束录音（注意：tick 返回 0，因为识别开始走后台）
     std::this_thread::sleep_for(std::chrono::milliseconds(1600));
-    CHECK(voice_tick(h) == 1);
+    voice_tick(h);
+    CHECK(voice_is_recording(h) == 0);
+    // 再轮询到识别完成
+    CHECK(wait_done(h));
     CHECK(voice_phase(h) == VOICE_DONE);
     voice_free(h);
     std::printf("test_tap_mode ok\n");
 }
 
 static void test_cancel() {
-    VoiceHandle *h = voice_new("/bin/cat", 300, 1500);
+    VoiceHandle *h = voice_new("cat", 300, 1500);
     voice_key_down(h);
     voice_cancel(h);
     CHECK(voice_phase(h) == VOICE_IDLE);

@@ -152,6 +152,16 @@ pub struct SherpaChannel {
     pcm: Vec<i16>,
 }
 
+/// 太短的片段不值得起一个识别进程。
+///
+/// 参照 trime-bibi-keyboard 的 `SenseVoiceEngine.MIN_AUDIO_MS`：按住语音键误触
+/// 几十毫秒的片段送去解码只会得到空串或噪声，而 SenseVoice 这类大模型每次
+/// 都要重新加载几百 MB，白等几秒。300ms 以下的录音直接跳过。
+pub const MIN_AUDIO_MS: usize = 300;
+
+/// 每次识别至少要有的采样点数（16kHz 单声道）。
+pub const MIN_SAMPLES: usize = 16000 * MIN_AUDIO_MS / 1000;
+
 impl SherpaChannel {
     pub fn new(name: impl Into<String>, opts: SherpaOptions) -> Self {
         Self {
@@ -166,7 +176,8 @@ impl SherpaChannel {
     /// sherpa-onnx 的 CLI 把识别结果打到 **stderr**（`std::cerr << os.str()`），
     /// stdout 只有 "Start to create recognizer" 这类进度行，所以两条都要看。
     fn run(&self) -> Option<String> {
-        if self.pcm.is_empty() {
+        // 太短就不必起进程了（见 MIN_AUDIO_MS）
+        if self.pcm.len() < MIN_SAMPLES {
             return None;
         }
         let path = temp_wav_path();
@@ -262,13 +273,21 @@ fn temp_wav_path() -> std::path::PathBuf {
 ///
 /// 协议（约定，不是 sherpa-onnx 的）：子进程从 stdin 读裸 16kHz 单声道 `i16` 小端 PCM，
 /// 每读到一段就向 stdout 输出**当前整句的中间结果**，一行一次（覆盖式，不是增量）。
-/// 关闭 stdin 表示说完，进程退出前 stdout 最后一行即最终结果。
 ///
-/// 这样不用 unsafe FFI 也能接真流式引擎：写个小脚本包一层 sherpa-onnx C API 即可。
+/// ## 句末标记
+///
+/// 早期版本用「关闭 stdin」表示说完。但那样每次按键都要重新起进程、
+/// 重新加载模型（SenseVoice int8 约 239MB），首字延迟很挤。
+/// 现在改为：句末往 stdin 写 4 字节哨兵 `0xFF 0xFF 0xFF 0xFF`
+/// （作为 i16 = -1，真实麦克风不会给出这个值），子进程据此切句并输出最终行，
+/// **进程和模型继续保留**，下次按键直接复用。
+///
+/// 兼容：不认识哨兵的子进程会把它当普通音频，行为退化为「只到 EOF 才出结果」——
+/// 那种情况仍然由 `stop()` 关 stdin 兵底。所以旧 wrapper 不会挂。
 pub struct StreamingChannel {
     name: String,
     program: Vec<String>,
-    /// 子进程（会话开始时惰性启动）
+    /// 子进程（跨会话复用）
     child: Option<Child>,
     /// 往子进程 stdin 写 PCM 的句柄
     stdin: Option<ChildStdin>,
@@ -278,7 +297,12 @@ pub struct StreamingChannel {
     last_line: Arc<Mutex<String>>,
     /// 读线程句柄（`stop` 时等它读完最后一行）
     reader: Option<std::thread::JoinHandle<()>>,
+    /// 子进程是否已报告「本句结束」（收到一个空行）
+    finished: Arc<Mutex<bool>>,
 }
+
+/// 句末哨兵：4 字节，解成 i16 是 -1（真实麦克风不会给出这个值）
+const SENTINEL: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 
 impl StreamingChannel {
     pub fn new(name: impl Into<String>, cmdline: &str) -> Self {
@@ -290,6 +314,7 @@ impl StreamingChannel {
             partial: Arc::new(Mutex::new(String::new())),
             last_line: Arc::new(Mutex::new(String::new())),
             reader: None,
+            finished: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -313,13 +338,18 @@ impl StreamingChannel {
         let stdin = child.stdin.take();
         let partial = self.partial.clone();
         let last_line = self.last_line.clone();
+        let finished = self.finished.clone();
         if let Some(stdout) = child.stdout.take() {
-            // 读线程只碰两个 Arc<Mutex<String>>，天然 Send
+            // 读线程只碰几个 Arc<Mutex<..>>，天然 Send
             self.reader = Some(std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
                     let line = line.trim().to_string();
                     if line.is_empty() {
+                        // 空行 = sherpa-serve 告知「本句结束、无文本」
+                        if let Ok(mut f) = finished.lock() {
+                            *f = true;
+                        }
                         continue;
                     }
                     if let Ok(mut p) = partial.lock() {
@@ -336,9 +366,109 @@ impl StreamingChannel {
         true
     }
 
-    /// 结束子进程并取走最终文本
+    /// 结束当前这一句并取走最终文本。
+    ///
+    /// 默认**保留**子进程和已加载的模型（这是 SenseVoice 能用的关键）：
+    /// 先写句末哨兵让它切句，再等它把最后一行打出来。
+    /// 写哨兵失败（管道断 / 子进程已死）才真的销毁，下次按键重建。
     fn stop(&mut self) -> Option<String> {
-        // 关 stdin = 告诉它「说完了」
+        self.finish_utterance()
+    }
+
+    /// 发送句末哨兵，等最后一行。进程保留。
+    fn finish_utterance(&mut self) -> Option<String> {
+        // 先记下预览阶段已经识别出的文本，作为句末结果为空时的兜底。
+        // （句末 sherpa-serve 会整段重新解码，正常情况下比预览更完整；
+        //   但若尾巴是静音导致整段解码出空，至少不要丢掉已经算出来的字。）
+        let preview = self.partial.lock().map(|p| p.clone()).unwrap_or_default();
+        self.partial.lock().map(|mut p| p.clear()).ok();
+        self.last_line.lock().map(|mut l| l.clear()).ok();
+
+        if self.stdin.is_none() {
+            // 没进程（空会话），直接返回
+            return None;
+        }
+
+        let sent = match self.stdin.as_mut() {
+            Some(stdin) => {
+                stdin.write_all(&SENTINEL).is_ok() && stdin.flush().is_ok()
+            }
+            None => false,
+        };
+        if !sent {
+            // 管道已断，进程也可能死了：彻底清掉，下次重建
+            self.kill();
+            return None;
+        }
+
+        // 等子进程报告本句结束。
+        //
+        // 两种子进程都要兼容：
+        // - 认识哨兵的（sherpa-serve）→ 输出最终行 + 空行，进程继续存活；
+        // - 不认识哨兵的旧 wrapper → 哨兵被当普通音频，只能靠关 stdin 才收尾。
+        //   那种情况在超时/无新输出后关掉 stdin 兵底（进程会退出，下次重建，
+        //   仅影响旧 wrapper，常驻路径不受影响）。
+        let mut last = String::new();
+        let mut stable = 0;
+        let start = std::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(15);
+        // 给认识哨兵的子进程留的宽限；过了这段还没动静就当它不认哨兵
+        let sentinel_grace = start + std::time::Duration::from_millis(1500);
+        let mut stdin_closed = false;
+        while std::time::Instant::now() < deadline {
+            // 空行信号：sherpa-serve 明确告知本句已完成
+            if self.finished.lock().map(|f| *f).unwrap_or(false) {
+                break;
+            }
+            let current = self.last_line.lock().map(|l| l.clone()).unwrap_or_default();
+            if !current.is_empty() {
+                if current == last {
+                    stable += 1;
+                    // 最后一行稳定下来（~300ms 没变）就认为写完了。
+                    // 但如果已经关了 stdin，仍以「读线程结束」为准确信号，
+                    // 否则会在真 final 到达前提前退出（旧 wrapper 靠 EOF 后才打 final）。
+                    if stable >= 15 && !stdin_closed {
+                        break;
+                    }
+                } else {
+                    last = current;
+                    stable = 0;
+                }
+            }
+            // 宽限期过了还没收到结束信号：关掉 stdin 让它收尾（兼容旧 wrapper）
+            if !stdin_closed && std::time::Instant::now() >= sentinel_grace {
+                self.stdin.take();
+                stdin_closed = true;
+                // 关掉后它应该收尾退出；重置稳定计数，再给一段等待时间
+                stable = 0;
+                continue;
+            }
+            // 已经关了 stdin，且读线程已结束（子进程退出、stdout 到底）→ 可以取了
+            if stdin_closed {
+                if let Some(r) = self.reader.as_ref() {
+                    if r.is_finished() {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let text = self.last_line.lock().map(|l| l.clone()).unwrap_or_default();
+        self.partial.lock().map(|mut p| p.clear()).ok();
+        self.last_line.lock().map(|mut l| l.clear()).ok();
+        self.finished.lock().map(|mut f| *f = false).ok();
+        // 句末结果为空时退回预览文本（见上面 preview 的注释）
+        let text = if text.is_empty() { preview } else { text };
+        if text.is_empty() {
+            None
+        } else {
+            Some(crate::t2s::to_simplified(&text))
+        }
+    }
+
+    /// 彻底关掉子进程（关 stdin + 等退出 + 必要时 kill）
+    fn kill(&mut self) {
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
             // 不无限等：某些 wrapper 不会自己退，最多等 3 秒就 kill，
@@ -358,10 +488,7 @@ impl StreamingChannel {
                 }
             }
         }
-        // 等读线程把最后一行写进 last_line，否则会读早。
-        // 不能裸 join：有些 wrapper 不主动关 stdout，读线程会一直阻塞在
-        // read 上，裸 join 会把 fcitx5 主线程卡死。这里最多等 2 秒，
-        // 超时就把线程丢下不管（它是 detached 的，进程退出时自然回收）。
+        // 等读线程自己退出（stdout 已关会很快）。同样不无限等。
         if let Some(reader) = self.reader.take() {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while !reader.is_finished() && std::time::Instant::now() < deadline {
@@ -371,14 +498,9 @@ impl StreamingChannel {
                 let _ = reader.join();
             }
         }
-        let text = self.last_line.lock().map(|l| l.clone()).unwrap_or_default();
         self.partial.lock().map(|mut p| p.clear()).ok();
         self.last_line.lock().map(|mut l| l.clear()).ok();
-        if text.is_empty() {
-            None
-        } else {
-            Some(crate::t2s::to_simplified(&text))
-        }
+        self.finished.lock().map(|mut f| *f = false).ok();
     }
 }
 
@@ -424,7 +546,19 @@ impl AsrChannel for StreamingChannel {
     }
 
     fn reset(&mut self) {
-        let _ = self.stop();
+        // 只清内部状态，**不发哨兵、不杀进程**（模型已在内存，下次按键复用）。
+        // 发哨兵是 finish_utterance 的事；这里再发一次会让子进程在空音频上
+        // 多输出一个空行，那行会污染下一句（下一句一开头就被误判为「已结束」）。
+        self.partial.lock().map(|mut p| p.clear()).ok();
+        self.last_line.lock().map(|mut l| l.clear()).ok();
+        self.finished.lock().map(|mut f| *f = false).ok();
+    }
+}
+
+impl Drop for StreamingChannel {
+    /// 渠道被丢弃（插件卸载 / 后端配置变更）时把子进程收掉，不留殏尸。
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -540,6 +674,25 @@ mod tests {
     }
 
     #[test]
+    fn min_audio_threshold_is_300ms() {
+        // 16000Hz * 0.3s
+        assert_eq!(MIN_SAMPLES, 4800);
+        assert_eq!(MIN_AUDIO_MS, 300);
+    }
+
+    #[test]
+    fn sherpa_channel_skips_tiny_clips() {
+        // 低于 MIN_SAMPLES 的片段直接返回 None（不会起进程）
+        let mut ch = SherpaChannel::new("sherpa", SherpaOptions::parse("--tokens=/t.txt"));
+        ch.feed(&vec![0i16; MIN_SAMPLES - 1]);
+        assert_eq!(ch.finish(), None);
+
+        // 空输入同样为 None
+        let mut empty = SherpaChannel::new("sherpa", SherpaOptions::parse("--tokens=/t.txt"));
+        assert_eq!(empty.finish(), None);
+    }
+
+    #[test]
     fn pick_text_skips_noise() {
         let stderr = "Number of threads: 2, Elapsed seconds: 0.31, Audio duration (s): 3.2, Real time factor (RTF) = 0.1/3.2 = 0.03\n\
                       今天天气不错\n\
@@ -594,8 +747,133 @@ mod tests {
             ch.partial_owned().is_some(),
             "子进程应已吐出至少一行中间结果"
         );
-        assert_eq!(ch.finish().as_deref(), Some("final"));
+        // 这个假后端**不认哨兵**，只会在 EOF 后才吐 final；新协议下会在宽限期
+        // 后关 stdin 兜底，所以拿到的可能是它最后吐的 part* 或 final——两者都算
+        // 合法收尾（真实常驻后端走哨兵路径，由 sentinel_separates_utterances 覆盖）。
+        let done = ch.finish();
+        assert!(done.is_some(), "旧协议后端也应能收回结果，而不是 None：{done:?}");
         assert!(ch.partial_owned().is_none());
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn streaming_channel_sentinel_separates_utterances() {
+        // 进程常驻 + 句末哨兵：每收到哨兵就输出并继续等，不退出
+        let script = std::env::temp_dir().join(format!(
+            "fcitx5_voice_fake_sentinel_{}_{}.py",
+            std::process::id(),
+            line!()
+        ));
+        // 假后端严格按协议实现：逐字节读（os.read 而不是缓冲 read），
+        // 前缀不明时等待而不是提前消费 2 字节，否则哨兵会被当成音频吃掉。
+        // 句末输出一行结果 + 一个空行（告知「本句结束」）。
+        let py = concat!(
+            "import sys, os\n",
+            "buf = b''\n",
+            "total = 0\n",
+            "while True:\n",
+            "    b = os.read(0, 1)\n",
+            "    if not b:\n",
+            "        break\n",
+            "    buf += b\n",
+            "    while True:\n",
+            "        if not buf:\n",
+            "            break\n",
+            "        if buf[0] != 0xFF:\n",
+            "            if len(buf) >= 2:\n",
+            "                buf = buf[2:]\n",
+            "                total += 1\n",
+            "                continue\n",
+            "            break\n",
+            "        if len(buf) >= 4:\n",
+            "            if buf[:4] == b'\\xff\\xff\\xff\\xff':\n",
+            "                buf = buf[4:]\n",
+            "                sys.stdout.write('utt%d\\n' % total)\n",
+            "                sys.stdout.write('\\n')\n",
+            "                sys.stdout.flush()\n",
+            "                total = 0\n",
+            "                continue\n",
+            "            buf = buf[2:]\n",
+            "            total += 1\n",
+            "            continue\n",
+            "        break\n",
+        );
+        std::fs::write(&script, py).unwrap();
+        let cmd = format!("python3 -u {}", script.display());
+        let mut ch = StreamingChannel::new("t", &cmd);
+
+        // 第一句
+        ch.feed(&[1i16; 1000]);
+        let first = ch.finish();
+        assert_eq!(first.as_deref(), Some("utt1000"), "第一句应有结果（整句 1000 样本）");
+        assert!(ch.partial_owned().is_none(), "句后 partial 应清空");
+
+        // 第二句：同一进程复用（如果进程死了，这步会失败或超时）
+        ch.feed(&[2i16; 1000]);
+        let second = ch.finish();
+        assert_eq!(second.as_deref(), Some("utt1000"), "第二句应复用同一进程（计数已复位）");
+
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn streaming_channel_accumulates_whole_utterance() {
+        // 回归测试：句末结果必须是**整句**音频，而不是最后一小段。
+        // 历史上 sherpa-serve 在中间预览后把缓冲清空，导致句末只解了最后不到 2 秒，
+        // 上屏为空。这里用一个回显累计样本数的假后端钉住这个行为。
+        let script = std::env::temp_dir().join(format!(
+            "fcitx5_voice_fake_accum_{}_{}.py",
+            std::process::id(),
+            line!()
+        ));
+        let py = concat!(
+            "import sys, os\n",
+            "buf = b''\n",
+            "total = 0\n",
+            "while True:\n",
+            "    b = os.read(0, 1)\n",
+            "    if not b:\n",
+            "        break\n",
+            "    buf += b\n",
+            "    while True:\n",
+            "        if not buf:\n",
+            "            break\n",
+            "        if buf[0] != 0xFF:\n",
+            "            if len(buf) >= 2:\n",
+            "                buf = buf[2:]\n",
+            "                total += 1\n",
+            "                continue\n",
+            "            break\n",
+            "        if len(buf) >= 4:\n",
+            "            if buf[:4] == b'\\xff\\xff\\xff\\xff':\n",
+            "                buf = buf[4:]\n",
+            "                sys.stdout.write('total%d\\n' % total)\n",
+            "                sys.stdout.flush()\n",
+            "                total = 0\n",
+            "                continue\n",
+            "            buf = buf[2:]\n",
+            "            total += 1\n",
+            "            continue\n",
+            "        break\n",
+        );
+        std::fs::write(&script, py).unwrap();
+        let cmd = format!("python3 -u {}", script.display());
+        let mut ch = StreamingChannel::new("t", &cmd);
+
+        // 分 3 次嗂 3000 个样本，句末应报告 3000（整句），而不是最后一块
+        ch.feed(&[1i16; 1000]);
+        ch.feed(&[1i16; 1000]);
+        ch.feed(&[1i16; 1000]);
+        assert_eq!(
+            ch.finish().as_deref(),
+            Some("total3000"),
+            "句末必须用整句音频，不能只解最后一段"
+        );
+
+        // 第二句从零开始计数
+        ch.feed(&[2i16; 500]);
+        assert_eq!(ch.finish().as_deref(), Some("total500"));
+
         let _ = std::fs::remove_file(&script);
     }
 

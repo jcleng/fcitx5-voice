@@ -7,7 +7,11 @@
 # 不要改这个文件（升级会被覆盖）。
 
 [Voice]
-# 识别命令；末尾自动追加 WAV 路径。空 = 关闭语音输入。
+# 识别命令。
+#   stream:<cmd>          stdin 流速式（边说边出字，sherpa-serve 走这条）
+#   sherpa-offline:<cmd>  sherpa-onnx CLI（每次重新加载模型）
+#   <其它>                通用「写 WAV 调命令行」，末尾自动追加 WAV 路径
+# 空 = 关闭语音输入。
 BackendCommand=@VOICE_DEFAULT_BACKEND@
 
 # 语音键：Alt_L / Alt_R / Control_R / Menu

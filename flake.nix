@@ -13,11 +13,18 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         voice = pkgs.callPackage ./nix/package.nix { };
+
+        # 只要 whisper 后端（不装 SenseVoice 模型，省 230MB）；
+        # 系统没 sherpa-onnx 时用这个。
+        voice-whisper = pkgs.callPackage ./nix/package.nix {
+          withSenseVoice = false;
+        };
       in
       {
         packages = {
           voice = voice;
           default = voice;
+          inherit voice-whisper;
         };
 
         # 开发 shell：能直接 cargo test / cmake 构建
@@ -29,11 +36,13 @@
             cargo-deny
             clang-tools
             cmake
-            extra-cmake-modules
+            kdePackages.extra-cmake-modules
             pkg-config
             fcitx5
             alsa-lib
             whisper-cpp
+            sherpa-onnx
+            python3
           ];
         };
 
@@ -54,7 +63,11 @@
                 gcc
                 pkg-config
               ];
-              buildInputs = with pkgs; [ alsa-lib ];
+              buildInputs = with pkgs; [
+                alsa-lib
+                # sherpa 协议测试用 python3 起假后端（streaming_channel_* 系列）
+                python3
+              ];
               # 核心单测 + C ABI 行为测试（capture 默认开，运行测试时跳过真实采集）
               buildPhase = ''
                 runHook preBuild
@@ -91,11 +104,28 @@
                 nm -D --defined-only ${p}/lib/fcitx5/libvoice.so \
                   | grep -q fcitx_addon_factory_instance
 
-                # 模型随包安装，且默认后端命令里指向本包的模型与 whisper-cli
+                # whisper 模型随包安装（保留作为可切换后端）
                 test -f ${p}/share/fcitx5-voice/ggml-base.bin
                 test "$(stat -c%s ${p}/share/fcitx5-voice/ggml-base.bin)" -gt 100000000
-                strings ${p}/lib/fcitx5/libvoice.so \
-                  | grep -q '${p}/share/fcitx5-voice/ggml-base.bin'
+
+                # SenseVoice 模型 + tokens + 常駩识别器都在包里（运行期不下载）
+                test -f ${p}/share/fcitx5-voice/sensevoice/model.int8.onnx
+                test -f ${p}/share/fcitx5-voice/sensevoice/tokens.txt
+                test "$(stat -c%s ${p}/share/fcitx5-voice/sensevoice/model.int8.onnx)" -gt 200000000
+                test -x ${p}/libexec/fcitx5-voice/sherpa-serve
+
+                # 默认配置必须用 stream: 前缀指向本包里的 sherpa-serve，
+                # 且模型/ tokens 路径都是本包的（而不是 /usr/share 或要自己下）
+                grep -q 'BackendCommand=stream:${p}/libexec/fcitx5-voice/sherpa-serve' \
+                  ${p}/share/fcitx5/conf/voice.conf
+                grep -q -- '--model=${p}/share/fcitx5-voice/sensevoice/model.int8.onnx' \
+                  ${p}/share/fcitx5/conf/voice.conf
+                grep -q -- '--tokens=${p}/share/fcitx5-voice/sensevoice/tokens.txt' \
+                  ${p}/share/fcitx5/conf/voice.conf
+
+                # 运行时能解析到 store 里的 sherpa-onnx C API 库
+                ldd ${p}/libexec/fcitx5-voice/sherpa-serve \
+                  | grep -q 'libsherpa-onnx-c-api'
                 touch $out
               '';
         };

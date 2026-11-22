@@ -47,6 +47,12 @@ struct Inner {
     capture_pcm: Arc<Mutex<Vec<i16>>>,
     /// 停止采集的信号（回调看到后不再收数据）
     stop_capture: Arc<std::sync::atomic::AtomicBool>,
+    /// 后台识别线程。`finish()` 会等外部进程（whisper / sherpa-serve）出结果，
+    /// 最长十几秒；这东西**绝对不能**在 fcitx5 主线程里跑，否则整个输入法
+    /// 按键全部无响应（实测的 bug）。所以把会话挪到线程里，主线程只轮询。
+    ///
+    /// 结果是 `(最终文本, 上屏增量)`，或错误字符串。
+    recognizing: Option<std::thread::JoinHandle<Result<(String, Update), String>>>,
     /// 活着的采集流（drop 即关闭麦克风）；cpal::Stream 是 !Send，只能留在本线程
     #[cfg(feature = "capture")]
     capture: Option<crate::capture::Capture>,
@@ -73,6 +79,7 @@ impl Inner {
             audio_level: Arc::new(Mutex::new(0.0)),
             capture_pcm: Arc::new(Mutex::new(Vec::new())),
             stop_capture: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            recognizing: None,
             #[cfg(feature = "capture")]
             capture: None,
         }
@@ -262,7 +269,8 @@ pub unsafe extern "C" fn voice_key_up(handle: *mut VoiceHandle) -> c_int {
     }
     let actions = guard.session.on_key_up(now);
     if actions.iter().any(|a| *a == Action::Stop) {
-        finish_session(&mut guard);
+        // 只是**开始**识别，不等结果（等就把主线程卡住了，见 finish_session 注释）
+        finish_session(&mut guard, inner.cfg);
         return 1;
     }
     0
@@ -277,6 +285,16 @@ pub unsafe extern "C" fn voice_tick(handle: *mut VoiceHandle) -> c_int {
     let inner = unsafe { &*handle };
     let now = Instant::now();
     let mut guard = inner.inner.lock().unwrap();
+
+    // 后台识别已完成？收割结果并报 DONE（这是 DONE 的唯一来源）
+    if reap_recognition(&mut guard) {
+        return (guard.phase == VOICE_DONE) as c_int;
+    }
+    if guard.phase == VOICE_RECOGNIZING {
+        // 识别中：不阻塞主线程，下个 50ms 再问
+        return 0;
+    }
+
     if !guard.session.is_recording() {
         return 0;
     }
@@ -298,8 +316,8 @@ pub unsafe extern "C" fn voice_tick(handle: *mut VoiceHandle) -> c_int {
     }
 
     if let Some(Action::Stop) = guard.session.tick(now) {
-        finish_session(&mut guard);
-        return 1;
+        finish_session(&mut guard, inner.cfg);
+        return 0; // 识别在后台跑，结果下次 tick 收割
     }
     // 音量：采集回调写 raw 音量，这里换算成 0-100
     let raw = *guard.audio_level.lock().unwrap();
@@ -478,6 +496,7 @@ fn cancel_session(guard: &mut Inner) {
     {
         guard.capture = None; // drop 关闭麦克风
     }
+    drop_session(guard);
     guard.session.cancel();
     guard.pending = None;
     guard.final_text.clear();
@@ -486,7 +505,15 @@ fn cancel_session(guard: &mut Inner) {
     *guard.audio_level.lock().unwrap() = 0.0;
 }
 
-fn finish_session(guard: &mut Inner) {
+/// 结束录音并**开始**后台识别。
+///
+/// 关键：这里不调 `session.finish()`——那个要等外部进程（whisper / sherpa-serve）
+/// 出结果，最长十几秒。此函数由 `voice_key_up` 在 fcitx5 主线程调用，
+/// 一旦同步等待，输入法就整个卡死（按键无响应）。
+///
+/// 所以：关麦克风 → 把会话挪给后台线程 → 立刻返回，阶段置为 `VOICE_RECOGNIZING`。
+/// 结果由 `reap_recognition` 在后续 `voice_tick` 里收割。
+fn finish_session(guard: &mut Inner, cfg: TriggerConfig) {
     guard
         .stop_capture
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -494,13 +521,56 @@ fn finish_session(guard: &mut Inner) {
     {
         guard.capture = None; // 先关麦克风再识别
     }
+
+    // 把会话整体挪进线程：用空会话换出来（语义即 take）。
+    // VoiceSession: Send（AsrChannel 约束了 Send），所以能安全跨线程。
+    // 占位会话不含任何渠道，下一次按下时 `reset_session` 会按后端重建。
+    let placeholder = VoiceSession::new(cfg, MultiChannel::new(Vec::new()));
+    let mut session = std::mem::replace(&mut guard.session, placeholder);
     guard.phase = VOICE_RECOGNIZING;
-    let (text, update) = guard.session.finish();
-    guard.final_text = text;
-    guard.pending = Some(update);
-    guard.phase = VOICE_DONE;
     guard.level = 0;
     *guard.audio_level.lock().unwrap() = 0.0;
+
+    guard.recognizing = Some(std::thread::spawn(move || {
+        let (text, update) = session.finish();
+        Ok((text, update))
+    }));
+}
+
+/// 收割后台识别结果（非阻塞）。返回 true 表示识别已结束（成功或失败）。
+fn reap_recognition(guard: &mut Inner) -> bool {
+    let Some(handle) = guard.recognizing.as_ref() else {
+        return false;
+    };
+    if !handle.is_finished() {
+        return false;
+    }
+    let handle = guard.recognizing.take().unwrap();
+    match handle.join() {
+        Ok(Ok((text, update))) => {
+            guard.final_text = text;
+            guard.pending = Some(update);
+            guard.phase = VOICE_DONE;
+        }
+        Ok(Err(e)) => {
+            guard.error = e;
+            guard.phase = VOICE_ERROR;
+        }
+        Err(_) => {
+            // 识别线程 panic：不要拖垮主进程，报错就好
+            guard.error = "识别线程崩溃".to_string();
+            guard.phase = VOICE_ERROR;
+        }
+    }
+    true
+}
+
+/// 把录音中的会话收干（取消时用）。
+fn drop_session(guard: &mut Inner) {
+    // 后台还在跑就等它收尾（取消场景不追求快，但也不能无限等）
+    if let Some(handle) = guard.recognizing.take() {
+        let _ = handle.join();
+    }
 }
 
 #[cfg(test)]
@@ -576,7 +646,69 @@ mod tests {
         unsafe { voice_key_down(h) };
         std::thread::sleep(std::time::Duration::from_millis(350));
         assert_eq!(unsafe { voice_key_up(h) }, 1);
+        // 松开后立刻进入「识别中」，**不能**在这里就是 DONE：
+        // 识别在后台线程跑，主线程不等（见 key_up_does_not_block_on_slow_backend）
+        assert_eq!(unsafe { voice_phase(h) }, VOICE_RECOGNIZING);
+
+        // 后台完成后，靠 tick 收割到 DONE
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if unsafe { voice_tick(h) } == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert_eq!(unsafe { voice_phase(h) }, VOICE_DONE);
+        unsafe { voice_free(h) };
+    }
+
+    /// 回归测试：松开语音键时**不能**在主线程里做识别。
+    ///
+    /// 识别后端是外部进程（whisper / sherpa-serve），`finish()` 会等它出结果，
+    /// 历史实现里最长等 15s。`voice_key_up` 由 fcitx5 主线程调用，
+    /// 直接同步等待 = 整个输入法卡死（按键全无响应）。
+    ///
+    /// 这里用一个「故意很慢」的后端钉住行为：
+    /// `voice_key_up` 必须立刻返回，结果靠后续 `voice_tick` 轮询拿到。
+    #[test]
+    fn key_up_does_not_block_on_slow_backend() {
+        // 慢后端：sleep 1.2s 后输出一行文本；小于 finish_utterance 的 15s 上限，
+        // 但远大于「主线程可接受的阻塞时间」。
+        let cmd = CString::new("sleep 1.2").unwrap();
+        let h = new_handle(cmd.as_ptr());
+        unsafe { voice_key_down(h) };
+        std::thread::sleep(std::time::Duration::from_millis(350));
+
+        let t0 = std::time::Instant::now();
+        unsafe { voice_key_up(h) };
+        let blocked = t0.elapsed();
+        assert!(
+            blocked < std::time::Duration::from_millis(200),
+            "voice_key_up 不能等识别：实测阻塞了 {blocked:?}（应 <200ms）"
+        );
+        unsafe { voice_free(h) };
+    }
+
+    /// 异步识别期间，`voice_tick` 也必须很快返回（它是 50ms 定时器里调的）。
+    #[test]
+    fn tick_stays_fast_while_recognizing() {
+        let cmd = CString::new("sleep 1.2").unwrap();
+        let h = new_handle(cmd.as_ptr());
+        unsafe { voice_key_down(h) };
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        unsafe { voice_key_up(h) };
+
+        // 识别进行中：连续 tick 都必须立刻返回
+        for _ in 0..10 {
+            let t0 = std::time::Instant::now();
+            unsafe { voice_tick(h) };
+            let dt = t0.elapsed();
+            assert!(
+                dt < std::time::Duration::from_millis(100),
+                "识别中 voice_tick 必须立刻返回，实测 {dt:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         unsafe { voice_free(h) };
     }
 }
